@@ -1,0 +1,44 @@
+{
+  "manifest_version": 3,
+  "name": "EdPuzzle Auto Answerer",
+  "version": "2.0",
+  "description": "Automatically answers EdPuzzle multiple choice questions using AI",
+  "permissions": ["storage", "activeTab"],
+  "host_permissions": ["https://openrouter.ai/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.edpuzzle.com/*"],
+      "js": ["inject-bootstrap.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["*://*.edpuzzle.com/*"],
+      "js": ["content.js"],
+      "css": ["styles.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["injector.js"],
+      "matches": ["*://*.edpuzzle.com/*"]
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "options_page": "settings.html",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

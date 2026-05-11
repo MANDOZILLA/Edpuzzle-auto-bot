@@ -1,0 +1,32 @@
+#epz-auto-badge {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 999999;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
+  cursor: pointer;
+  user-select: none;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  transition: background-color 0.2s, transform 0.15s;
+}
+
+#epz-auto-badge:hover {
+  transform: scale(1.1);
+}
+
+#epz-auto-badge.epz-active {
+  background-color: #22c55e;
+}
+
+#epz-auto-badge.epz-inactive {
+  background-color: #6b7280;
+}
