@@ -23,7 +23,7 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["injector.js"],
+      "resources": ["injector.js", "injector2.js"],
       "matches": ["*://*.edpuzzle.com/*"]
     }
   ],

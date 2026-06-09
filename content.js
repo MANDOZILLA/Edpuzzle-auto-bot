@@ -4,7 +4,8 @@
   let processing = false;
   let badge = null;
   let cachedQuestions = [];
-  let answeredQuestions = new Set();
+  let questionAttempts = new Map();
+  let lastAnsweredFingerprint = null;
 
   chrome.storage.local.get("enabled", (data) => {
     enabled = data.enabled !== false;
@@ -112,6 +113,33 @@
     return (el.innerText || el.textContent || "").trim();
   }
 
+  // --- Combination generator for multi-select brute-force ---
+  function generateCombinations(n) {
+    const results = [];
+    for (let size = 1; size <= n; size++) {
+      (function combo(start, current) {
+        if (current.length === size) { results.push([...current]); return; }
+        for (let i = start; i < n; i++) { current.push(i); combo(i + 1, current); current.pop(); }
+      })(0, []);
+    }
+    return results;
+  }
+
+  // --- Detect input type (checkbox=multi, radio=single) ---
+  function detectInputType() {
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => { window.removeEventListener("message", handler); resolve("unknown"); }, 5000);
+      function handler(event) {
+        if (event.source !== window || event.data?.type !== "EPZ_INPUT_TYPE_RESULT") return;
+        window.removeEventListener("message", handler);
+        clearTimeout(timeout);
+        resolve(event.data.inputType);
+      }
+      window.addEventListener("message", handler);
+      window.postMessage({ type: "EPZ_DETECT_INPUT_TYPE" }, "*");
+    });
+  }
+
   // --- Find which cached question is currently visible ---
   function findCurrentQuestion() {
     const bodyText = normalize(document.body.innerText);
@@ -126,124 +154,82 @@
     return null;
   }
 
-  // --- Poll for choice elements and click the matching one ---
-  function pollAndClickAnswer(answerText, maxAttempts = 12) {
+  // --- Delegate click to page world (injector.js) via postMessage ---
+  function pollAndClickAnswer(choiceIndex) {
     return new Promise((resolve) => {
-      let attempt = 0;
+      const timeout = setTimeout(() => {
+        window.removeEventListener("message", handler);
+        console.warn(`${TAG} Click answer timed out`);
+        resolve(false);
+      }, 10000);
 
-      function tryClick() {
-        attempt++;
-        const choices = document.querySelectorAll('[data-test-id*="multiple-choice-question-choice"]');
-        console.log(`${TAG} Click poll #${attempt}: ${choices.length} choices in DOM`);
-
-        if (choices.length === 0) {
-          if (attempt < maxAttempts) {
-            setTimeout(tryClick, 500);
-          } else {
-            console.warn(`${TAG} No choice elements found after ${maxAttempts} attempts`);
-            resolve(false);
-          }
-          return;
-        }
-
-        // Log all choice texts
-        choices.forEach((c, i) => {
-          console.log(`${TAG}   Choice ${i}: "${getElementText(c)}"`);
-        });
-
-        // Try to match
-        for (const choice of choices) {
-          const choiceText = getElementText(choice);
-          if (textsMatch(choiceText, answerText)) {
-            console.log(`${TAG} Matched: "${choiceText}"`);
-            const target = choice.querySelector('[data-test-id="choice-content"]') || choice;
-            simulateClick(target);
-            resolve(true);
-            return;
-          }
-        }
-
-        // Fuzzy word match as fallback
-        for (const choice of choices) {
-          const choiceText = normalize(getElementText(choice));
-          const words = normalize(answerText).split(" ").filter(w => w.length > 2);
-          const hits = words.filter(w => choiceText.includes(w)).length;
-          if (words.length > 0 && hits / words.length >= 0.5) {
-            console.log(`${TAG} Fuzzy matched: "${choiceText}" (${hits}/${words.length} words)`);
-            const target = choice.querySelector('[data-test-id="choice-content"]') || choice;
-            simulateClick(target);
-            resolve(true);
-            return;
-          }
-        }
-
-        // No match yet — choices may still be loading text
-        if (attempt < maxAttempts) {
-          setTimeout(tryClick, 500);
-        } else {
-          console.warn(`${TAG} Could not match "${answerText}" after ${maxAttempts} attempts`);
-          resolve(false);
-        }
+      function handler(event) {
+        if (event.source !== window || event.data?.type !== "EPZ_CLICK_RESULT") return;
+        window.removeEventListener("message", handler);
+        clearTimeout(timeout);
+        console.log(`${TAG} Click result: ${event.data.success}`);
+        resolve(event.data.success);
       }
 
-      tryClick();
+      window.addEventListener("message", handler);
+      window.postMessage({ type: "EPZ_CLICK_ANSWER", choiceIndex }, "*");
     });
   }
 
-  // --- Poll for submit button and click it ---
-  function pollAndClickSubmit(maxAttempts = 8) {
+  function pollAndClickMultiAnswer(choiceIndices, totalChoices) {
     return new Promise((resolve) => {
-      let attempt = 0;
-
-      function trySubmit() {
-        attempt++;
-
-        // Try data-test-id
-        let btn = document.querySelector('[data-test-id*="submit"], [data-test-id*="check-answer"]');
-
-        // Try by text
-        if (!btn || btn.disabled) {
-          btn = null;
-          for (const b of document.querySelectorAll("button")) {
-            const text = normalize(b.textContent);
-            if ((text.includes("submit") || text.includes("check")) && !b.disabled) {
-              btn = b;
-              break;
-            }
-          }
-        }
-
-        if (btn && !btn.disabled) {
-          console.log(`${TAG} Clicking submit (attempt ${attempt})`);
-          simulateClick(btn);
-          resolve(true);
-          return;
-        }
-
-        if (attempt < maxAttempts) {
-          setTimeout(trySubmit, 500);
-        } else {
-          console.warn(`${TAG} Submit not found after ${maxAttempts} attempts`);
-          resolve(false);
-        }
+      const timeout = setTimeout(() => { window.removeEventListener("message", handler); resolve(false); }, 10000);
+      function handler(event) {
+        if (event.source !== window || event.data?.type !== "EPZ_CLICK_RESULT") return;
+        window.removeEventListener("message", handler);
+        clearTimeout(timeout);
+        resolve(event.data.success);
       }
-
-      trySubmit();
+      window.addEventListener("message", handler);
+      window.postMessage({ type: "EPZ_CLICK_MULTI_ANSWER", choiceIndices, totalChoices }, "*");
     });
   }
 
-  // --- Simulate click with full event sequence ---
-  function simulateClick(el) {
-    const rect = el.getBoundingClientRect();
-    const x = rect.left + rect.width / 2;
-    const y = rect.top + rect.height / 2;
-    const opts = { bubbles: true, cancelable: true, clientX: x, clientY: y, view: window };
+  function pollAndClickSubmit() {
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        window.removeEventListener("message", handler);
+        console.warn(`${TAG} Submit timed out`);
+        resolve(false);
+      }, 8000);
 
-    el.dispatchEvent(new PointerEvent("pointerdown", opts));
-    el.dispatchEvent(new MouseEvent("mousedown", opts));
-    el.dispatchEvent(new PointerEvent("pointerup", opts));
-    el.dispatchEvent(new MouseEvent("mouseup", opts));
-    el.dispatchEvent(new MouseEvent("click", opts));
+      function handler(event) {
+        if (event.source !== window || event.data?.type !== "EPZ_SUBMIT_RESULT") return;
+        window.removeEventListener("message", handler);
+        clearTimeout(timeout);
+        console.log(`${TAG} Submit result: ${event.data.success}`);
+        resolve(event.data.success);
+      }
+
+      window.addEventListener("message", handler);
+      window.postMessage({ type: "EPZ_CLICK_SUBMIT" }, "*");
+    });
+  }
+
+  function pollAndClickContinue() {
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        window.removeEventListener("message", handler);
+        console.warn(`${TAG} Continue timed out`);
+        resolve(false);
+      }, 8000);
+
+      function handler(event) {
+        if (event.source !== window || event.data?.type !== "EPZ_CONTINUE_RESULT") return;
+        window.removeEventListener("message", handler);
+        clearTimeout(timeout);
+        console.log(`${TAG} Continue result: ${event.data.success}`);
+        resolve(event.data.success);
+      }
+
+      window.addEventListener("message", handler);
+      window.postMessage({ type: "EPZ_CLICK_CONTINUE" }, "*");
+    });
   }
 
   // --- Resume video ---
@@ -260,70 +246,107 @@
     return new Promise(r => setTimeout(r, ms));
   }
 
-  // --- Main question handler ---
+  // --- Persistence helpers ---
+  function getAssignmentKey() {
+    return "epz_attempts_" + location.pathname.replace(/[^a-zA-Z0-9]/g, "_");
+  }
+
+  function persistAttempts() {
+    const obj = Object.fromEntries(questionAttempts);
+    chrome.storage.local.set({ [getAssignmentKey()]: obj });
+  }
+
+  function restoreAttempts() {
+    const key = getAssignmentKey();
+    chrome.storage.local.get(key, (data) => {
+      if (data[key]) {
+        questionAttempts = new Map(Object.entries(data[key]).map(([k, v]) => [k, Number(v)]));
+        console.log(`${TAG} Restored ${questionAttempts.size} attempt records`);
+      }
+    });
+  }
+
+  // --- Main question handler (brute-force) ---
   async function handleQuestion() {
     if (!enabled || processing || cachedQuestions.length === 0) return;
 
     const matched = findCurrentQuestion();
-    if (!matched) return;
+    if (!matched) {
+      lastAnsweredFingerprint = null;
+      return;
+    }
 
     const questionText = getQuestionText(matched);
     const type = getQuestionType(matched);
     const fingerprint = matched.id || normalize(questionText).substring(0, 50);
 
-    if (answeredQuestions.has(fingerprint)) return;
+    if (fingerprint === lastAnsweredFingerprint) return;
 
     if (type !== "multiple-choice") {
       console.log(`${TAG} Non-MC question "${type}", skipping.`);
-      answeredQuestions.add(fingerprint);
+      lastAnsweredFingerprint = fingerprint;
       return;
     }
 
     const choices = getChoices(matched);
     if (choices.length < 2) return;
 
-    processing = true;
-    answeredQuestions.add(fingerprint);
+    const attemptCount = questionAttempts.get(fingerprint) || 0;
 
-    const choiceTexts = choices.map(c => c.text);
-    console.log(`${TAG} Question: "${questionText}"`);
-    console.log(`${TAG} Choices: ${choiceTexts.join(" | ")}`);
-    console.log(`${TAG} Asking AI...`);
+    processing = true;
 
     try {
-      const response = await new Promise((resolve, reject) => {
-        chrome.runtime.sendMessage(
-          { type: "ASK_AI", question: questionText, choices: choiceTexts },
-          (resp) => {
-            if (chrome.runtime.lastError) {
-              reject(new Error(chrome.runtime.lastError.message));
-            } else {
-              resolve(resp || { error: "No response from background" });
-            }
-          }
-        );
-      });
+      const inputType = await detectInputType();
+      const isMultiSelect = inputType === "checkbox";
 
-      if (response.error) {
-        console.error(`${TAG} AI error: ${response.error}`);
+      const choiceTexts = choices.map(c => c.text);
+      let maxAttempts, currentCombo;
+
+      if (isMultiSelect) {
+        const allCombos = generateCombinations(choices.length);
+        maxAttempts = allCombos.length;
+        currentCombo = allCombos[attemptCount];
+      } else {
+        maxAttempts = choices.length;
+        currentCombo = null;
+      }
+
+      if (attemptCount >= maxAttempts) {
+        console.warn(`${TAG} All ${maxAttempts} ${isMultiSelect ? "combos" : "choices"} exhausted for: "${questionText}"`);
+        lastAnsweredFingerprint = fingerprint;
         processing = false;
         return;
       }
 
-      const answerText = choiceTexts[response.answerIndex];
-      console.log(`${TAG} AI picked choice ${response.answerIndex + 1}: "${answerText}"`);
+      console.log(`${TAG} Question: "${questionText}"`);
+      console.log(`${TAG} Choices: ${choiceTexts.join(" | ")}`);
 
-      // Wait a moment for UI to be ready, then poll and click
-      await sleep(500);
-      const clicked = await pollAndClickAnswer(answerText);
+      let clicked;
+      if (isMultiSelect) {
+        console.log(`${TAG} Multi-select attempt ${attemptCount + 1}/${maxAttempts}: indices [${currentCombo}] = ${currentCombo.map(i => choiceTexts[i]).join(" + ")}`);
+        await sleep(300);
+        clicked = await pollAndClickMultiAnswer(currentCombo, choices.length);
+      } else {
+        console.log(`${TAG} Attempt ${attemptCount + 1}/${maxAttempts}: clicking choice index ${attemptCount} ("${choiceTexts[attemptCount]}")`);
+        await sleep(300);
+        clicked = await pollAndClickAnswer(attemptCount);
+      }
 
       if (clicked) {
-        await sleep(1000);
-        await pollAndClickSubmit();
-        await sleep(2000);
+        await sleep(500);
+        const submitted = await pollAndClickSubmit();
+        questionAttempts.set(fingerprint, attemptCount + 1);
+        persistAttempts();
+        await sleep(1500);
+        const continued = await pollAndClickContinue();
+        if (!continued) {
+          console.log(`${TAG} No continue/next button — resuming video for replay`);
+        }
+        await sleep(500);
         resumeVideo();
       }
 
+      lastAnsweredFingerprint = fingerprint;
       processing = false;
     } catch (err) {
       console.error(`${TAG} Error:`, err);
@@ -366,8 +389,14 @@
   function init() {
     createBadge();
     setPlaybackSpeed();
+    restoreAttempts();
     startWatching();
-    console.log(`${TAG} EdPuzzle Auto Answerer v2 loaded`);
+    questionAttempts = new Map();
+    chrome.storage.local.get(null, function(all) {
+      var keys = Object.keys(all).filter(function(k) { return k.startsWith("epz_attempts_"); });
+      if (keys.length) chrome.storage.local.remove(keys);
+    });
+    console.log(`${TAG} EdPuzzle Auto Answerer v2 (brute-force mode) loaded`);
   }
 
   if (document.readyState === "loading") {

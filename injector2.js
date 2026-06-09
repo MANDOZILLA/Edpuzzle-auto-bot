@@ -74,6 +74,29 @@
     return origSend.apply(this, args);
   };
 
+  // --- Check current state of a choice element ---
+  function getCheckState(choiceEl) {
+    var input = choiceEl.querySelector('input[type="checkbox"], input[type="radio"]');
+    if (input) return input.checked;
+    var aria = choiceEl.getAttribute('aria-checked');
+    if (aria !== null) return aria === 'true';
+    return /\b(selected|checked|active)\b/i.test(choiceEl.className || '');
+  }
+
+  // --- Native setter for React controlled inputs ---
+  function nativeCheckboxToggle(el) {
+    var cb = el.tagName === 'INPUT' ? el : el.querySelector('input[type="checkbox"], input[type="radio"]');
+    if (!cb) return false;
+    var descriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked');
+    if (descriptor && descriptor.set) {
+      descriptor.set.call(cb, !cb.checked);
+      cb.dispatchEvent(new Event('input', { bubbles: true }));
+      cb.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    }
+    return false;
+  }
+
   // --- React fiber click ---
   function reactClick(el) {
     // Strategy 1: React fiber onClick
@@ -88,7 +111,22 @@
         const handler = props.onClick || props.onChange || props.onMouseDown;
         if (typeof handler === "function") {
           console.log(`${TAG} React fiber handler found at depth ${depth}:`, fiber.type, el);
-          handler(new MouseEvent("click", { bubbles: true }));
+          var syntheticEvent = {
+            type: "click",
+            target: el,
+            currentTarget: el,
+            bubbles: true,
+            cancelable: true,
+            defaultPrevented: false,
+            preventDefault: function() { this.defaultPrevented = true; },
+            stopPropagation: function() {},
+            nativeEvent: new MouseEvent("click", { bubbles: true }),
+            persist: function() {},
+            isDefaultPrevented: function() { return this.defaultPrevented; },
+            isPropagationStopped: function() { return false; }
+          };
+          handler(syntheticEvent);
+          nativeCheckboxToggle(el);
           return true;
         }
         fiber = fiber.return;
@@ -99,11 +137,16 @@
       console.log(`${TAG} No React fiber on element`, el.tagName, el.className);
     }
 
-    // Strategy 2: direct .click()
+    // Strategy 2: native checkbox setter (React controlled inputs)
+    if (nativeCheckboxToggle(el)) {
+      console.log(`${TAG} Native checkbox toggle applied on`, el.tagName);
+    }
+
+    // Strategy 3: direct .click()
     console.log(`${TAG} Trying direct .click() on`, el);
     el.click();
 
-    // Strategy 3: full synthetic event sequence
+    // Strategy 4: full synthetic event sequence
     const rect = el.getBoundingClientRect();
     const x = rect.left + rect.width / 2;
     const y = rect.top + rect.height / 2;
@@ -118,10 +161,10 @@
 
   // --- Find choice elements using multiple selector strategies ---
   function findChoiceElements() {
-    // Strategy 1: data-test-id selectors
+    // Strategy 1: data-test-id selectors (exclude inner choice-content elements)
     const testIdStrategies = [
       '[data-test-id*="multiple-choice-question-choice"]',
-      '[data-test-id*="choice"]',
+      '[data-test-id*="choice"]:not([data-test-id="choice-content"])',
       '[data-test-id*="answer-choice"]',
       '[data-test-id*="option"]',
     ];
@@ -257,6 +300,33 @@
     tryClick();
   }
 
+  // --- Find a button by text keywords ---
+  function findButton(keywords) {
+    // Try button text first (more reliable than data-test-id for action buttons)
+    for (var b of document.querySelectorAll("button, a[role='button'], [role='button']")) {
+      var text = normalize(b.textContent);
+      for (var kw of keywords) {
+        if (text.includes(kw) && !b.disabled) return b;
+      }
+    }
+    // Fallback: data-test-id
+    for (var kw of keywords) {
+      var btn = document.querySelector('[data-test-id*="' + kw + '"]');
+      if (btn && !btn.disabled) return btn;
+    }
+    return null;
+  }
+
+  // --- Aggressively click a button ---
+  function forceClickButton(btn) {
+    console.warn(`${TAG} forceClickButton: "${btn.textContent.trim()}" tag=${btn.tagName}`);
+    reactClick(btn);
+    btn.click();
+    btn.focus();
+    btn.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+    btn.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+  }
+
   // --- Handle submit click request ---
   function handleClickSubmit() {
     let attempt = 0;
@@ -264,23 +334,14 @@
 
     function trySubmit() {
       attempt++;
+      var btn = findButton(["submit", "check"]);
 
-      let btn = document.querySelector('[data-test-id*="submit"], [data-test-id*="check-answer"]');
+      // If no submit button, check if "Next question" is already showing (auto-graded correct)
+      if (!btn) btn = findButton(["next question"]);
 
-      if (!btn || btn.disabled) {
-        btn = null;
-        for (const b of document.querySelectorAll("button")) {
-          const text = normalize(b.textContent);
-          if ((text.includes("submit") || text.includes("check")) && !b.disabled) {
-            btn = b;
-            break;
-          }
-        }
-      }
-
-      if (btn && !btn.disabled) {
-        console.log(`${TAG} Clicking submit (attempt ${attempt})`);
-        reactClick(btn);
+      if (btn) {
+        console.log(`${TAG} Clicking submit (attempt ${attempt}): "${btn.textContent.trim()}"`);
+        forceClickButton(btn);
         window.postMessage({ type: "EPZ_SUBMIT_RESULT", success: true }, "*");
         return;
       }
@@ -294,6 +355,45 @@
     }
 
     trySubmit();
+  }
+
+  // --- Handle continue click request ---
+  function handleClickContinue() {
+    let attempt = 0;
+    const maxAttempts = 10;
+
+    function tryContinue() {
+      attempt++;
+      // Only look for actual "next" buttons — never click "Rewatch"
+      var btn = findButton(["next question", "continue", "siguiente"]);
+
+      // Fallback: look for any button with "next" but NOT "rewatch"
+      if (!btn) {
+        for (var b of document.querySelectorAll("button")) {
+          var text = normalize(b.textContent);
+          if (text.includes("next") && !text.includes("rewatch") && !b.disabled) {
+            btn = b;
+            break;
+          }
+        }
+      }
+
+      if (btn) {
+        console.log(`${TAG} Clicking continue (attempt ${attempt}): "${btn.textContent.trim()}"`);
+        forceClickButton(btn);
+        window.postMessage({ type: "EPZ_CONTINUE_RESULT", success: true }, "*");
+        return;
+      }
+
+      if (attempt < maxAttempts) {
+        setTimeout(tryContinue, 500);
+      } else {
+        console.warn(`${TAG} Continue not found after ${maxAttempts} attempts`);
+        window.postMessage({ type: "EPZ_CONTINUE_RESULT", success: false }, "*");
+      }
+    }
+
+    tryContinue();
   }
 
   // --- Click choice by index (brute-force mode) ---
@@ -330,23 +430,36 @@
       // Try clicking the choice container
       reactClick(choice);
 
-      // Also try any nested clickable targets
+      // Strategy A: React controlled input — use native property setter
+      var cb = choice.querySelector('input[type="checkbox"], input[type="radio"]');
+      if (cb) {
+        console.warn(`${TAG}   Found ${cb.type} input, using native setter`);
+        var descriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked');
+        if (descriptor && descriptor.set) {
+          descriptor.set.call(cb, !cb.checked);
+          cb.dispatchEvent(new Event('input', { bubbles: true }));
+          cb.dispatchEvent(new Event('change', { bubbles: true }));
+          cb.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+          console.warn(`${TAG}   Native setter applied, checked=${cb.checked}`);
+        }
+      }
+
+      // Strategy B: click inner choice-content target
       var inner = choice.querySelector('[data-test-id="choice-content"]');
       if (inner) { console.warn(`${TAG}   Also clicking choice-content`); reactClick(inner); }
-      var cb = choice.querySelector('input[type="checkbox"], input[type="radio"]');
-      if (cb) { console.warn(`${TAG}   Also clicking checkbox/radio input`); cb.click(); }
 
-      // Also try clicking all ancestor elements up to 3 levels
+      // Strategy C: walk ancestors for React handlers
       var parent = choice.parentElement;
-      for (var i = 0; i < 3 && parent; i++) {
+      for (var i = 0; i < 5 && parent; i++) {
         var pFiber = Object.keys(parent).find(function(k) { return k.startsWith('__reactFiber$'); });
         if (pFiber) {
           var f = parent[pFiber];
           while (f) {
-            var h = (f.memoizedProps || {}).onClick || (f.memoizedProps || {}).onChange;
+            var props = f.memoizedProps || f.pendingProps || {};
+            var h = props.onClick || props.onChange || props.onMouseDown;
             if (typeof h === 'function') {
-              console.warn(`${TAG}   Found handler on ancestor ${i+1}: ${parent.tagName}`);
-              h(new MouseEvent('click', {bubbles: true}));
+              console.warn(`${TAG}   Found handler on ancestor ${i+1}: ${parent.tagName}.${(parent.className||'').substring(0,30)}`);
+              h({ type: "click", target: choice, currentTarget: parent, bubbles: true, cancelable: true, defaultPrevented: false, preventDefault: function(){}, stopPropagation: function(){}, nativeEvent: new MouseEvent("click", {bubbles:true}), persist: function(){}, isDefaultPrevented: function(){return false}, isPropagationStopped: function(){return false} });
               break;
             }
             f = f.return;
@@ -362,6 +475,61 @@
     tryClick();
   }
 
+  // --- Multi-select: click combination of choices ---
+  function handleClickMultiByIndices(choiceIndices, totalChoices) {
+    var attempt = 0;
+    var maxAttempts = 15;
+    var selectedSet = {};
+    choiceIndices.forEach(function(i) { selectedSet[i] = true; });
+
+    function tryClick() {
+      attempt++;
+      var choices = findChoiceElements();
+
+      if (!choices || choices.length < 2) {
+        if (attempt < maxAttempts) { setTimeout(tryClick, 500); }
+        else { window.postMessage({ type: "EPZ_CLICK_RESULT", success: false }, "*"); }
+        return;
+      }
+
+      console.warn(`${TAG} Multi-select: setting indices [${choiceIndices}] of ${choices.length} choices`);
+
+      var toggleQueue = [];
+      for (var i = 0; i < choices.length; i++) {
+        var isChecked = getCheckState(choices[i]);
+        var shouldBeChecked = !!selectedSet[i];
+        if (shouldBeChecked !== isChecked) {
+          toggleQueue.push(i);
+        }
+      }
+
+      if (toggleQueue.length === 0) {
+        console.warn(`${TAG} All choices already in correct state`);
+        window.postMessage({ type: "EPZ_CLICK_RESULT", success: true }, "*");
+        return;
+      }
+
+      var idx = 0;
+      function toggleNext() {
+        if (idx >= toggleQueue.length) {
+          window.postMessage({ type: "EPZ_CLICK_RESULT", success: true }, "*");
+          return;
+        }
+        var ci = toggleQueue[idx];
+        var choice = choices[ci];
+        var action = selectedSet[ci] ? "Checking" : "Unchecking";
+        console.warn(`${TAG}   ${action} index ${ci}: "${getElText(choice).substring(0, 30)}"`);
+        reactClick(choice.querySelector('[data-test-id="choice-content"]') || choice);
+        nativeCheckboxToggle(choice);
+        idx++;
+        setTimeout(toggleNext, 150);
+      }
+      toggleNext();
+    }
+
+    tryClick();
+  }
+
   // --- Listen for click requests from content script ---
   window.addEventListener("message", (event) => {
     if (event.source !== window) return;
@@ -371,8 +539,24 @@
       } else {
         handleClickAnswer(event.data.answerText, event.data.allChoices);
       }
+    } else if (event.data?.type === "EPZ_CLICK_MULTI_ANSWER") {
+      handleClickMultiByIndices(event.data.choiceIndices, event.data.totalChoices);
     } else if (event.data?.type === "EPZ_CLICK_SUBMIT") {
       handleClickSubmit();
+    } else if (event.data?.type === "EPZ_CLICK_CONTINUE") {
+      handleClickContinue();
+    } else if (event.data?.type === "EPZ_DETECT_INPUT_TYPE") {
+      var choices = findChoiceElements();
+      var inputType = "unknown";
+      if (choices && choices.length > 0) {
+        var firstInput = choices[0].querySelector('input[type="checkbox"]');
+        if (firstInput) { inputType = "checkbox"; }
+        else {
+          firstInput = choices[0].querySelector('input[type="radio"]');
+          if (firstInput) { inputType = "radio"; }
+        }
+      }
+      window.postMessage({ type: "EPZ_INPUT_TYPE_RESULT", inputType: inputType }, "*");
     }
   });
 
