@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "EdPuzzle Auto Answerer",
-  "version": "2.0",
+  "version": "2.1",
   "description": "Automatically answers EdPuzzle multiple choice questions using AI",
   "permissions": ["storage", "activeTab"],
   "host_permissions": ["https://openrouter.ai/*"],
@@ -23,7 +23,7 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["injector.js"],
+      "resources": ["injector3.js"],
       "matches": ["*://*.edpuzzle.com/*"]
     }
   ],
