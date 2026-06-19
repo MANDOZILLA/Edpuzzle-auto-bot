@@ -1,3 +1,4 @@
+console.log("[EPZ-DEBUG] content.js file executing at", new Date().toISOString(), "readyState:", document.readyState);
 (() => {
   const TAG = "[EPZ]";
   let enabled = true;
@@ -49,6 +50,7 @@
     const questions = event.data.questions;
     if (questions && questions.length > 0) {
       cachedQuestions = questions;
+      window.__epzDiag = { cachedQuestions: questions.length, enabled };
       console.log(`${TAG} Cached ${questions.length} questions from API`);
       questions.forEach((q, i) => {
         const qText = getQuestionText(q) || "(empty)";
@@ -142,16 +144,22 @@
 
   // --- Find which cached question is currently visible ---
   function findCurrentQuestion() {
+    // Score by fraction of choices visible — duplicate question texts (same body,
+    // different choices) otherwise match the wrong cached question
     const bodyText = normalize(document.body.innerText);
+    let best = null, bestScore = 0;
     for (const q of cachedQuestions) {
       const qText = normalize(getQuestionText(q));
       if (!qText || qText.length < 3) continue;
-      if (bodyText.includes(qText)) {
-        const choices = getChoices(q);
-        if (choices.some(c => bodyText.includes(normalize(c.text)))) return q;
-      }
+      if (!bodyText.includes(qText)) continue;
+      const choices = getChoices(q);
+      if (choices.length === 0) continue;
+      const hits = choices.filter(c => c.text && bodyText.includes(normalize(c.text))).length;
+      if (hits === 0) continue;
+      const score = hits / choices.length;
+      if (score > bestScore) { bestScore = score; best = q; }
     }
-    return null;
+    return best;
   }
 
   // --- Delegate click to page world (injector.js) via postMessage ---
@@ -272,6 +280,18 @@
 
     const matched = findCurrentQuestion();
     if (!matched) {
+      // Check for Note screen — has Continue button but no choice elements
+      const buttons = [...document.querySelectorAll("button")];
+      const continueBtn = buttons.find(b => {
+        const t = (b.textContent || "").trim().toLowerCase();
+        return t === "continue" || t === "next question";
+      });
+      if (continueBtn && document.querySelectorAll('[data-test-id*="choice"]').length === 0) {
+        console.log(`${TAG} Dismissed note/info screen via Continue`);
+        continueBtn.click();
+        await sleep(500);
+        resumeVideo();
+      }
       lastAnsweredFingerprint = null;
       return;
     }
@@ -281,6 +301,29 @@
     const fingerprint = matched.id || normalize(questionText).substring(0, 50);
 
     if (fingerprint === lastAnsweredFingerprint) return;
+
+    // Detect already-answered state: Continue/Next is visible but Submit is not
+    {
+      const pageButtons = [...document.querySelectorAll("button")];
+      const hasEnabledSubmit = pageButtons.some(b => {
+        const t = normalize(b.textContent);
+        return (t.includes("submit") || t.includes("check")) && !b.disabled;
+      });
+      const nextBtn = pageButtons.find(b => {
+        const t = normalize(b.textContent);
+        return (t === "continue" || t.includes("next question") || t.includes("siguiente")) && !b.disabled;
+      });
+      if (!hasEnabledSubmit && nextBtn) {
+        processing = true;
+        console.log(`${TAG} Question already answered — clicking Continue/Next`);
+        nextBtn.click();
+        await sleep(500);
+        resumeVideo();
+        lastAnsweredFingerprint = fingerprint;
+        processing = false;
+        return;
+      }
+    }
 
     if (type !== "multiple-choice") {
       console.log(`${TAG} Non-MC question "${type}", skipping.`);
@@ -332,9 +375,13 @@
         clicked = await pollAndClickAnswer(attemptCount);
       }
 
+      let submitted = false;
       if (clicked) {
         await sleep(500);
-        const submitted = await pollAndClickSubmit();
+        submitted = await pollAndClickSubmit();
+      }
+
+      if (submitted) {
         questionAttempts.set(fingerprint, attemptCount + 1);
         persistAttempts();
         await sleep(1500);
@@ -344,9 +391,13 @@
         }
         await sleep(500);
         resumeVideo();
+        lastAnsweredFingerprint = fingerprint;
+      } else {
+        // Selection didn't register (Submit stayed disabled) — don't click Continue
+        // (would skip the question) and don't consume an attempt; retry next cycle
+        console.warn(`${TAG} Click/submit failed — will retry this question`);
+        lastAnsweredFingerprint = null;
       }
-
-      lastAnsweredFingerprint = fingerprint;
       processing = false;
     } catch (err) {
       console.error(`${TAG} Error:`, err);

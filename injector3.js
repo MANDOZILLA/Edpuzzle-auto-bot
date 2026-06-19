@@ -74,28 +74,30 @@
     return origSend.apply(this, args);
   };
 
-  // --- Check current state of a choice element ---
-  function getCheckState(choiceEl) {
-    var input = choiceEl.querySelector('input[type="checkbox"], input[type="radio"]');
-    if (input) return input.checked;
-    var aria = choiceEl.getAttribute('aria-checked');
-    if (aria !== null) return aria === 'true';
-    return /\b(selected|checked|active)\b/i.test(choiceEl.className || '');
+  // --- Debug: dump React fiber handlers on a choice element ---
+  function dumpHandlers(el) {
+    console.warn(`${TAG} === FIBER HANDLER DEBUG ===`);
+    function check(node, label) {
+      if (!node) return;
+      var fk = Object.keys(node).find(function(k) {
+        return k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$');
+      });
+      if (!fk) { console.warn(`${TAG}   ${label}: no fiber`); return; }
+      var f = node[fk], d = 0;
+      while (f && d < 12) {
+        var p = f.memoizedProps || f.pendingProps || {};
+        var h = Object.keys(p).filter(function(k) { return k.startsWith('on') && typeof p[k] === 'function'; });
+        if (h.length) console.warn(`${TAG}   ${label} d${d} [${f.type||'?'}]: ${h.join(', ')}`);
+        f = f.return; d++;
+      }
+    }
+    check(el, 'choice');
+    check(el.querySelector('[data-test-id="choice-content"]'), 'content');
+    check(el.querySelector('input'), 'input');
+    check(el.querySelector('label'), 'label');
+    console.warn(`${TAG} === END FIBER DEBUG ===`);
   }
 
-  // --- Native setter for React controlled inputs ---
-  function nativeCheckboxToggle(el) {
-    var cb = el.tagName === 'INPUT' ? el : el.querySelector('input[type="checkbox"], input[type="radio"]');
-    if (!cb) return false;
-    var descriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked');
-    if (descriptor && descriptor.set) {
-      descriptor.set.call(cb, !cb.checked);
-      cb.dispatchEvent(new Event('input', { bubbles: true }));
-      cb.dispatchEvent(new Event('change', { bubbles: true }));
-      return true;
-    }
-    return false;
-  }
 
   // --- React fiber click ---
   function reactClick(el) {
@@ -126,7 +128,6 @@
             isPropagationStopped: function() { return false; }
           };
           handler(syntheticEvent);
-          nativeCheckboxToggle(el);
           return true;
         }
         fiber = fiber.return;
@@ -137,12 +138,7 @@
       console.log(`${TAG} No React fiber on element`, el.tagName, el.className);
     }
 
-    // Strategy 2: native checkbox setter (React controlled inputs)
-    if (nativeCheckboxToggle(el)) {
-      console.log(`${TAG} Native checkbox toggle applied on`, el.tagName);
-    }
-
-    // Strategy 3: direct .click()
+    // Strategy 2: direct .click()
     console.log(`${TAG} Trying direct .click() on`, el);
     el.click();
 
@@ -330,14 +326,14 @@
   // --- Handle submit click request ---
   function handleClickSubmit() {
     let attempt = 0;
-    const maxAttempts = 10;
+    const maxAttempts = 15;
 
     function trySubmit() {
       attempt++;
       var btn = findButton(["submit", "check"]);
 
-      // If no submit button, check if "Next question" is already showing (auto-graded correct)
-      if (!btn) btn = findButton(["next question"]);
+      // If no submit button, check if "Next question" or "Continue" is already showing
+      if (!btn) btn = findButton(["next question", "continue", "siguiente"]);
 
       if (btn) {
         console.log(`${TAG} Clicking submit (attempt ${attempt}): "${btn.textContent.trim()}"`);
@@ -346,10 +342,21 @@
         return;
       }
 
+      // Check for disabled submit — if present, answer might not have registered yet
+      if (attempt >= 8) {
+        for (var b of document.querySelectorAll("button")) {
+          var text = normalize(b.textContent);
+          if ((text.includes("submit") || text.includes("check")) && b.disabled) {
+            console.warn(`${TAG} Submit found but DISABLED (attempt ${attempt}) — answer click may not have registered`);
+            break;
+          }
+        }
+      }
+
       if (attempt < maxAttempts) {
-        setTimeout(trySubmit, 500);
+        setTimeout(trySubmit, 400);
       } else {
-        console.warn(`${TAG} Submit not found after ${maxAttempts} attempts`);
+        console.warn(`${TAG} Submit not found/enabled after ${maxAttempts} attempts`);
         window.postMessage({ type: "EPZ_SUBMIT_RESULT", success: false }, "*");
       }
     }
@@ -422,65 +429,139 @@
       }
 
       var choice = choices[choiceIndex];
-      console.warn(`${TAG} === CLICK DEBUG START ===`);
-      console.warn(`${TAG} Clicking choice index ${choiceIndex} of ${choices.length}`);
-      console.warn(`${TAG}   Element: ${choice.tagName} class="${(choice.className||'').substring(0,60)}" text="${getElText(choice).substring(0,30)}"`);
-      console.warn(`${TAG}   outerHTML preview: ${choice.outerHTML.substring(0, 200)}`);
-
-      // Try clicking the choice container
-      reactClick(choice);
-
-      // Strategy A: React controlled input — use native property setter
-      var cb = choice.querySelector('input[type="checkbox"], input[type="radio"]');
-      if (cb) {
-        console.warn(`${TAG}   Found ${cb.type} input, using native setter`);
-        var descriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked');
-        if (descriptor && descriptor.set) {
-          descriptor.set.call(cb, !cb.checked);
-          cb.dispatchEvent(new Event('input', { bubbles: true }));
-          cb.dispatchEvent(new Event('change', { bubbles: true }));
-          cb.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-          console.warn(`${TAG}   Native setter applied, checked=${cb.checked}`);
-        }
-      }
-
-      // Strategy B: click inner choice-content target
-      var inner = choice.querySelector('[data-test-id="choice-content"]');
-      if (inner) { console.warn(`${TAG}   Also clicking choice-content`); reactClick(inner); }
-
-      // Strategy C: walk ancestors for React handlers
-      var parent = choice.parentElement;
-      for (var i = 0; i < 5 && parent; i++) {
-        var pFiber = Object.keys(parent).find(function(k) { return k.startsWith('__reactFiber$'); });
-        if (pFiber) {
-          var f = parent[pFiber];
-          while (f) {
-            var props = f.memoizedProps || f.pendingProps || {};
-            var h = props.onClick || props.onChange || props.onMouseDown;
-            if (typeof h === 'function') {
-              console.warn(`${TAG}   Found handler on ancestor ${i+1}: ${parent.tagName}.${(parent.className||'').substring(0,30)}`);
-              h({ type: "click", target: choice, currentTarget: parent, bubbles: true, cancelable: true, defaultPrevented: false, preventDefault: function(){}, stopPropagation: function(){}, nativeEvent: new MouseEvent("click", {bubbles:true}), persist: function(){}, isDefaultPrevented: function(){return false}, isPropagationStopped: function(){return false} });
-              break;
-            }
-            f = f.return;
-          }
-        }
-        parent = parent.parentElement;
-      }
-
-      console.warn(`${TAG} === CLICK DEBUG END ===`);
+      console.warn(`${TAG} Clicking choice ${choiceIndex}/${choices.length}: "${getElText(choice).substring(0,40)}"`);
+      reactSetChecked(choice, true);
       window.postMessage({ type: "EPZ_CLICK_RESULT", success: true }, "*");
     }
 
     tryClick();
   }
 
+  // --- Click a choice element to toggle selection ---
+  function reactSetChecked(choiceEl, desiredChecked) {
+    var input = choiceEl.querySelector('input[type="checkbox"], input[type="radio"]');
+
+    if (!reactSetChecked._dbg) {
+      reactSetChecked._dbg = true;
+      dumpHandlers(choiceEl);
+    }
+
+    console.warn(`${TAG} ${desiredChecked ? 'Checking' : 'Unchecking'}: "${getElText(choiceEl).substring(0, 40)}"`);
+
+    if (input) {
+      // Strategy 0: Walk fiber tree from input looking for onToggle (EdPuzzle's handler)
+      var fiberKey = Object.keys(input).find(function(k) {
+        return k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$');
+      });
+      if (fiberKey) {
+        var fiber = input[fiberKey];
+        var depth = 0;
+        while (fiber && depth < 35) {
+          var props = fiber.memoizedProps || fiber.pendingProps || {};
+          if (typeof props.onToggle === 'function') {
+            console.warn(`${TAG} Calling onToggle at depth ${depth}`);
+            try { props.onToggle(); } catch(e) { console.warn(`${TAG} onToggle threw:`, e); }
+            console.warn(`${TAG} After onToggle → checked=${input.checked}`);
+            return;
+          }
+          fiber = fiber.return;
+          depth++;
+        }
+      }
+
+      // Strategy 1: Directly invoke React fiber onChange on the input element.
+      // React-controlled checkboxes call preventDefault() on native clicks,
+      // so input.click() never toggles checked. We must call onChange ourselves.
+      if (fiberKey) {
+        var fiber = input[fiberKey];
+        var depth = 0;
+        while (fiber && depth < 35) {
+          var props = fiber.memoizedProps || fiber.pendingProps || {};
+          if (typeof props.onChange === 'function') {
+            var nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked').set;
+            nativeSetter.call(input, desiredChecked);
+            console.warn(`${TAG} Calling fiber onChange at depth ${depth}, target.checked=${input.checked}`);
+            try {
+              props.onChange({
+                type: 'change',
+                target: input,
+                currentTarget: input,
+                bubbles: true,
+                cancelable: true,
+                defaultPrevented: false,
+                preventDefault: function() {},
+                stopPropagation: function() {},
+                persist: function() {},
+                nativeEvent: new Event('change', { bubbles: true }),
+                isDefaultPrevented: function() { return false; },
+                isPropagationStopped: function() { return false; }
+              });
+            } catch(e) {
+              console.warn(`${TAG} fiber onChange threw:`, e);
+            }
+            console.warn(`${TAG} After fiber onChange → checked=${input.checked}`);
+            return;
+          }
+          fiber = fiber.return;
+          depth++;
+        }
+      }
+
+      // Strategy 2: Reset React's internal value tracker so it detects the change,
+      // then set checked via native setter and dispatch events
+      var tracker = input._valueTracker;
+      if (tracker) tracker.setValue(String(!desiredChecked));
+      var nativeSetter2 = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked').set;
+      nativeSetter2.call(input, desiredChecked);
+      input.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      console.warn(`${TAG} valueTracker reset + events → checked=${input.checked}`);
+      if (input.checked === desiredChecked) return;
+
+      // Strategy 3: Plain input.click()
+      input.click();
+      console.warn(`${TAG} input.click() → checked=${input.checked}`);
+      if (input.checked === desiredChecked) return;
+    }
+
+    // Strategy 4: Walk fiber from choiceEl for onToggle (broader search)
+    var choiceFiberKey = Object.keys(choiceEl).find(function(k) {
+      return k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$');
+    });
+    if (choiceFiberKey) {
+      var fiber = choiceEl[choiceFiberKey];
+      var depth = 0;
+      while (fiber && depth < 35) {
+        var props = fiber.memoizedProps || fiber.pendingProps || {};
+        if (typeof props.onToggle === 'function') {
+          console.warn(`${TAG} choiceEl onToggle at depth ${depth}`);
+          try { props.onToggle(); } catch(e) {}
+          console.warn(`${TAG} After choiceEl onToggle → checked=${input ? input.checked : 'no-input'}`);
+          return;
+        }
+        fiber = fiber.return;
+        depth++;
+      }
+    }
+
+    // Strategy 5: Click label
+    var label = choiceEl.querySelector('label');
+    if (label) {
+      label.click();
+      console.warn(`${TAG} label.click() → checked=${input ? input.checked : 'no-input'}`);
+      if (input && input.checked === desiredChecked) return;
+    }
+
+    // Strategy 6: reactClick on container
+    var target = choiceEl.querySelector('[data-test-id="choice-content"]') || choiceEl;
+    reactClick(target);
+    console.warn(`${TAG} reactClick fallback → checked=${input ? input.checked : 'no-input'}`);
+  }
+
   // --- Multi-select: click combination of choices ---
   function handleClickMultiByIndices(choiceIndices, totalChoices) {
     var attempt = 0;
     var maxAttempts = 15;
-    var selectedSet = {};
-    choiceIndices.forEach(function(i) { selectedSet[i] = true; });
 
     function tryClick() {
       attempt++;
@@ -492,39 +573,25 @@
         return;
       }
 
-      console.warn(`${TAG} Multi-select: setting indices [${choiceIndices}] of ${choices.length} choices`);
+      console.warn(`${TAG} Multi-select: clicking indices [${choiceIndices}] of ${choices.length} choices`);
 
-      var toggleQueue = [];
-      for (var i = 0; i < choices.length; i++) {
-        var isChecked = getCheckState(choices[i]);
-        var shouldBeChecked = !!selectedSet[i];
-        if (shouldBeChecked !== isChecked) {
-          toggleQueue.push(i);
-        }
-      }
-
-      if (toggleQueue.length === 0) {
-        console.warn(`${TAG} All choices already in correct state`);
-        window.postMessage({ type: "EPZ_CLICK_RESULT", success: true }, "*");
-        return;
-      }
-
+      // Just click desired indices — don't check input.checked (unreliable due to
+      // prior native setter desync). Questions appear fresh each time after replay.
       var idx = 0;
-      function toggleNext() {
-        if (idx >= toggleQueue.length) {
-          window.postMessage({ type: "EPZ_CLICK_RESULT", success: true }, "*");
+      function clickNext() {
+        if (idx >= choiceIndices.length) {
+          setTimeout(function() {
+            window.postMessage({ type: "EPZ_CLICK_RESULT", success: true }, "*");
+          }, 400);
           return;
         }
-        var ci = toggleQueue[idx];
-        var choice = choices[ci];
-        var action = selectedSet[ci] ? "Checking" : "Unchecking";
-        console.warn(`${TAG}   ${action} index ${ci}: "${getElText(choice).substring(0, 30)}"`);
-        reactClick(choice.querySelector('[data-test-id="choice-content"]') || choice);
-        nativeCheckboxToggle(choice);
+        var ci = choiceIndices[idx];
+        if (ci >= choices.length) { idx++; clickNext(); return; }
+        reactSetChecked(choices[ci], true);
         idx++;
-        setTimeout(toggleNext, 150);
+        setTimeout(clickNext, 300);
       }
-      toggleNext();
+      clickNext();
     }
 
     tryClick();

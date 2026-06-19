@@ -1,0 +1,11 @@
+{
+  "name": "edpuzzle-bot-harness",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "test": "node run.js"
+  },
+  "dependencies": {
+    "playwright": "^1.52.0"
+  }
+}

@@ -1,0 +1,6 @@
+node_modules/
+test/logs/
+test/screenshots/
+.agents/
+skills-lock.json
+*.png
